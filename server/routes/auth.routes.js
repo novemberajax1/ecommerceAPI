@@ -2,7 +2,7 @@ import { Router } from "express";
 import { body, validationResult } from "express-validator";
 import argon2 from "argon2";
 import db from "../database/postgres";
-import jwt from "jsonwebtoken"; //handles issuance of JWT tokens
+import jwt from "jsonwebtoken";
 
 const router = Router();
 
@@ -41,17 +41,18 @@ router.post(
       uPhash: passwordHash,
     };
 
-    const result = await db.oneOrNone(
+    const result = await db.one(
       "INSERT INTO users(email,password_hash) VALUES($1,$2) RETURNING id",
       [userDetails.uEmail, userDetails.uPhash],
     );
 
+    const userid = result.id;
     //secret
     const secret = process.env.JWT_SECRET;
     //automatic login , including the id in user id in the payload of the JWT token
     //generate and sign JWT
     //payload,secret, expiration time
-    const token = jwt.sign({ userID: result.id }, secret, {
+    const token = jwt.sign({ userID: userid }, secret, {
       expiresIn: "15m",
     }); //expires in 15 minutes
 

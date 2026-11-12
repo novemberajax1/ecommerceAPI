@@ -57,14 +57,15 @@ router.get("/cart", JWTAuth, async (req, res) => {
   //cart do not exists
   if (cartDetails.length === 0) {
     return res.status(404).send({
+      cart_id: null,
       items: [],
       subtotal: "0.00",
-      cart_id: null,
     });
   }
 
   //empty cart, cart exists but emmpty values , postgrs poopulate the right table
   // with null because no mathching value exists
+  //one result
   if (cartDetails[0].ciPID === null) {
     return res.status(200).send({
       cart_id: cartDetails[0].cID,
@@ -89,7 +90,7 @@ router.get("/cart", JWTAuth, async (req, res) => {
       items: cartDetails
         .filter((cartDetails) => {
           cartDetails.ciPID !== null;
-        }) // if the cart is empty , excluding the role with nll
+        }) // if the cart is empty , excluding the role with null, taking the row with pid not null
         .map((cartDetails) => ({
           id: cartDetails.ciID,
           product_id: cartDetails.ciPID,
@@ -112,7 +113,59 @@ router.get("/cart", JWTAuth, async (req, res) => {
 //create the cart when the customer first add an item
 //need user info in body , users, inset userid and creat cart, insert cart item table
 //add products to the cart
-router.post("/cart/items", JWTAuth, async (req, res) => {});
+router.post("/cart/items", JWTAuth, async (req, res) => {
+  const id = req.auth.userID; //the id to identify the user
+  const { quant, pID } = req.body; //get the product id and quantity feom the client, need validation
+
+  //inset usedid into the cart table the user id is a foreign key to the user id in the users table
+  //return the cart id to inset into the cart items table
+  //creating a cart
+
+  const newCart = await db.one(
+    "INSERT INTO cart (user_id) VALUES($1) RETURNING cart_id",
+    id,
+  );
+
+  //select product info from products table make sure it is active and stock_quantity is > 0
+  //active products
+  const productInfo = await db.oneOrNone(
+    "SELECT product_id, price,description FROM products WHERE product_id = $1 AND stock_quantity >= 0 AND is_active = TRUE ",
+    pID,
+  );
+
+  //check two things, cannot find product 404
+  if (productInfo === null) {
+    res.status(404).json({
+      error: "Product not found",
+    });
+  }
+  //check insufficient stock
+  if (productInfo.stock_quantity < 0) {
+    res.status(400).json({
+      error: "Insufficient stock",
+    });
+  }
+
+  //return product info
+  //cannot insert the same product as product id and cart id  is unique,if violated vilate unique constraint
+  //no added repeaed products
+  //so if add repeated products, ensure users specifiy the right about for that individual product items
+  //consider existin items in the cart, avoiding add duplicates
+  const cartItems = await db.one(
+    `INSERT INTO cart_items (description,quantity, cart_id, product_id,price) 
+    VALUES ($1, $2, $3, $4, $5) 
+    RETURNING *`,
+    productInfo.description,
+    quant,
+    newCart.cart_id,
+    productInfo.product_id,
+    productInfo.price,
+  );
+
+  return res.status(200).json({});
+
+  //also need to think about decreasing the stock
+});
 
 //remove items in the cart by id
 //params

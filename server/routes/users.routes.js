@@ -1,6 +1,7 @@
 import { Router } from "express";
 import JWTAuth from "../middleware/jwtmiddleware";
 import db from "../database/postgres";
+import { body, validateResult } from "express-validator";
 const router = Router();
 
 //authorization middleware verifies the token, check role admin or user
@@ -113,59 +114,85 @@ router.get("/cart", JWTAuth, async (req, res) => {
 //create the cart when the customer first add an item
 //need user info in body , users, inset userid and creat cart, insert cart item table
 //add products to the cart
-router.post("/cart/items", JWTAuth, async (req, res) => {
-  const id = req.auth.userID; //the id to identify the user
-  const { quant, pID } = req.body; //get the product id and quantity feom the client, need validation
+//THIS PART REQUIRE TRANSACTION OR QUERY OPTIMIZATIONS
+// body data valid -> product -> user cart exists -> add
+router.post(
+  "/cart/items",
+  JWTAuth,
+  body("quantity").trim().notEmpty().withMessage("Quantity required"),
+  async (req, res) => {
+    //check valid body data
+    const id = req.auth.userID; //the id to identify the user
+    const { quantityWanted, pID } = req.body; //get the product id and quantity feom the client, need validation
 
-  //inset usedid into the cart table the user id is a foreign key to the user id in the users table
-  //return the cart id to inset into the cart items table
-  //creating a cart
+    //check whethrre the product exists, active and stock
+    //need to set up a stock threshold
+    const productInfo = await db.oneOrNone(
+      "SELECT product_id, price,description FROM products WHERE product_id = $1 AND stock_quantity >= $2 AND is_active = TRUE ",
+      pID,
+      quantityWanted,
+    );
+    //check two things, cannot find product 404
+    if (productInfo === null) {
+      res.status(404).json({
+        error: "Product not found",
+      });
+    }
+    //check insufficient stock
+    //need to setup a threshiold in db
+    if (productInfo.stock_quantity < 0) {
+      res.status(400).json({
+        error: "Insufficient stock",
+      });
+    }
 
-  const newCart = await db.one(
-    "INSERT INTO cart (user_id) VALUES($1) RETURNING cart_id",
-    id,
-  );
+    let cartID; //declare a variable here if exitsing then .. if do not exist ...
+    //check if the user has a cart, if there is none create, else use the existing cart
+    const cartExists = await db.oneOrNone(
+      "SELECT cart_id created_at FROM cart WHERE user_id = $1 RETURNING cart_id",
+      id,
+    );
 
-  //select product info from products table make sure it is active and stock_quantity is > 0
-  //active products
-  const productInfo = await db.oneOrNone(
-    "SELECT product_id, price,description FROM products WHERE product_id = $1 AND stock_quantity >= 0 AND is_active = TRUE ",
-    pID,
-  );
+    if (cartExists === null) {
+      //create one and returning the new cart id
+      const newCart = await db.one(
+        "INSERT INTO cart (user_id) VALUES($1) RETURNING cart_id",
+        id,
+      );
+      cartID = newCart.cart_id; //new id for new cart, store it in here
+    }
+    cartID = cartExists.cart_id; //existing cart id
 
-  //check two things, cannot find product 404
-  if (productInfo === null) {
-    res.status(404).json({
-      error: "Product not found",
-    });
-  }
-  //check insufficient stock
-  if (productInfo.stock_quantity < 0) {
-    res.status(400).json({
-      error: "Insufficient stock",
-    });
-  }
-
-  //return product info
-  //cannot insert the same product as product id and cart id  is unique,if violated vilate unique constraint
-  //no added repeaed products
-  //so if add repeated products, ensure users specifiy the right about for that individual product items
-  //consider existin items in the cart, avoiding add duplicates
-  const cartItems = await db.one(
-    `INSERT INTO cart_items (description,quantity, cart_id, product_id,price) 
+    //return product info
+    //cannot insert the same product as product id and cart id  is unique,if violated vilate unique constraint
+    //Repeated items are not allowed
+    //so if add repeated products, ensure users specifiy the right about for that individual product items
+    //consider existin items in the cart, avoiding add duplicates
+    //tatocal insertion
+    const cartItems = await db.one(
+      `INSERT INTO cart_items (description,quantity, cart_id, product_id,price) 
     VALUES ($1, $2, $3, $4, $5) 
     RETURNING *`,
-    productInfo.description,
-    quant,
-    newCart.cart_id,
-    productInfo.product_id,
-    productInfo.price,
-  );
+      productInfo.description,
+      quant,
+      cartID, //use this when the cart exists
+      productInfo.product_id,
+      productInfo.price,
+    );
 
-  return res.status(200).json({});
+    //items created, return info confirmation
+    return res.status(201).json({
+      itemsID: cartItems.id,
+      description: cartItems.description,
+      quantity: cartItems.quantity,
+      pID: cartItems.product_id,
+      price: cartItems.price,
+      createdAt: cartItems.created_at,
+    });
 
-  //also need to think about decreasing the stock
-});
+    //also need to think about decreasing the stock, stock decreasing happens when checking out, order established
+  },
+);
 
 //remove items in the cart by id
 //params

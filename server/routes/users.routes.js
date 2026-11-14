@@ -1,7 +1,7 @@
 import { Router } from "express";
 import JWTAuth from "../middleware/jwtmiddleware";
 import db from "../database/postgres";
-import { body, validateResult } from "express-validator";
+import { body, check, validateResult } from "express-validator";
 const router = Router();
 
 //authorization middleware verifies the token, check role admin or user
@@ -10,7 +10,7 @@ const router = Router();
 //user routes requie auth middleware
 
 //get the entire cart and items, everyhting, index 2 tables
-router.get("/cart", JWTAuth, async (req, res) => {
+router.get("/carts", JWTAuth, async (req, res) => {
   //join tables
   const user_id = req.auth.userID; //need the id to identify the user cart ,paylod inside the JWT
 
@@ -117,18 +117,23 @@ router.get("/cart", JWTAuth, async (req, res) => {
 //THIS PART REQUIRE TRANSACTION OR QUERY OPTIMIZATIONS
 // body data valid -> product -> user cart exists -> add
 router.post(
-  "/cart/items",
+  "/carts/items",
   JWTAuth,
-  body("quantity").trim().notEmpty().withMessage("Quantity required"),
+  [
+    body("quantity").trim().notEmpty().withMessage("Quantity required"),
+    body("pID").trim().notEmpty().withMessage("Product id is required"),
+  ], //need extra check
   async (req, res) => {
     //check valid body data
     const id = req.auth.userID; //the id to identify the user
     const { quantityWanted, pID } = req.body; //get the product id and quantity feom the client, need validation
 
     //check whethrre the product exists, active and stock
-    //need to set up a stock threshold
     const productInfo = await db.oneOrNone(
-      "SELECT product_id, price,description FROM products WHERE product_id = $1 AND stock_quantity >= $2 AND is_active = TRUE ",
+      `SELECT product_id, price, description,stock_quantity 
+      FROM products WHERE product_id = $1 
+      AND stock_quantity >= $2 
+      AND is_active = TRUE`,
       pID,
       quantityWanted,
     );
@@ -140,9 +145,16 @@ router.post(
     }
     //check insufficient stock
     //need to setup a threshiold in db
-    if (productInfo.stock_quantity < 0) {
-      res.status(400).json({
+    //the request is valid but it
+    // conflict with current state of the inventory (insufficient)
+    // on the sever
+    //the databse constraint check whether the stock is bigger and equal to 0
+    //app context ->  we check the db stock against the requested amount
+    if (productInfo.stock_quantity < quantityWanted) {
+      res.status(409).json({
         error: "Insufficient stock",
+        reqStock: quantityWanted, //requested stock
+        actualStock: productInfo.stock_quantity, //actual stock
       });
     }
 
@@ -153,15 +165,18 @@ router.post(
       id,
     );
 
+    //no rows returned, do not exists
     if (cartExists === null) {
       //create one and returning the new cart id
       const newCart = await db.one(
         "INSERT INTO cart (user_id) VALUES($1) RETURNING cart_id",
         id,
       );
-      cartID = newCart.cart_id; //new id for new cart, store it in here
+      //new id for new cart, store it in here
+      cartID = newCart.cart_id;
     }
-    cartID = cartExists.cart_id; //existing cart id
+    //use existing cart id
+    cartID = cartExists.cart_id;
 
     //return product info
     //cannot insert the same product as product id and cart id  is unique,if violated vilate unique constraint
@@ -174,7 +189,7 @@ router.post(
     VALUES ($1, $2, $3, $4, $5) 
     RETURNING *`,
       productInfo.description,
-      quant,
+      quantityWanted,
       cartID, //use this when the cart exists
       productInfo.product_id,
       productInfo.price,
@@ -196,7 +211,54 @@ router.post(
 
 //remove items in the cart by id
 //params
-router.delete("/cart/items/:id", JWTAuth, async (req, res) => {});
+//we need to identify
+//  the user cart and then the cart items id to delete from
+//cart id identigies which user cart to look into
+//cart item id tatget the exacgt item to remove
+
+router.delete("/cart/:cartID/items/:cartItemsid", JWTAuth, async (req, res) => {
+  //get the cartid and cart items id
+  const { cid, ciID } = req.params;
+  const uID = req.auth.userID; //user identifier
+
+  //index into db, delete from cart
+  //check user cart exists
+  //you confirm by the cart exits here
+  const checkCart = await db.oneOrNone(
+    "SELECT cart_id FROM cart WHERE user_id = $1 AND cart_id = $2",
+    uID,
+    cid,
+  );
+
+  //if the cart do not exists
+  if (checkCart === null) {
+    return res.status(404).send({
+      error: "Cart not found",
+    });
+  }
+  //cart exists
+  //item deletion
+  //then perform deletion
+  const deletion = await db.result(
+    "DELETE FROM cart_items WHERE id = $1",
+    ciID,
+  );
+
+  //resource to be deleted does not exists
+  if (deletion.rowCount === 0) {
+    return res.status(404).json({
+      error: "Item not found",
+    });
+  }
+
+  // successful deletion
+  // deleting something that just has been deleted
+  //the state of the sever remains the same even if there are further attempts in deleting the same resource
+  //this is more about context
+  //tells the client the outcome has been acheived
+  //returning 204 treats an already satisfied deletion request as successful
+  res.status(204).send();
+});
 
 //cart checkout, index into orders database
 //check price changes

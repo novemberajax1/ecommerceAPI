@@ -55,7 +55,7 @@ router.post(
 //changr specific fields not all of em
 //for now change price,change stock,maybe
 //adminstrator updates inventory and performs stock correction and price changes, but not when the customers is ordering
-
+//set a threshold for checking the stock of products ??
 router.patch(
   "/admin/products/:id",
   JWTAuth,

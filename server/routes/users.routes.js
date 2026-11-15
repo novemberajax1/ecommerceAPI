@@ -1,7 +1,8 @@
 import { Router } from "express";
 import JWTAuth from "../middleware/jwtmiddleware";
-import db from "../database/postgres";
+import { db, insertOrderitems } from "../database/postgres";
 import { body, check, validateResult } from "express-validator";
+
 const router = Router();
 
 //authorization middleware verifies the token, check role admin or user
@@ -176,7 +177,9 @@ router.post(
       cartID = newCart.cart_id;
     }
     //use existing cart id
-    cartID = cartExists.cart_id;
+    else {
+      cartID = cartExists.cart_id;
+    }
 
     //return product info
     //cannot insert the same product as product id and cart id  is unique,if violated vilate unique constraint
@@ -188,11 +191,13 @@ router.post(
       `INSERT INTO cart_items (description,quantity, cart_id, product_id,price) 
     VALUES ($1, $2, $3, $4, $5) 
     RETURNING *`,
-      productInfo.description,
-      quantityWanted,
-      cartID, //use this when the cart exists
-      productInfo.product_id,
-      productInfo.price,
+      [
+        productInfo.description,
+        quantityWanted,
+        cartID, //use this when the cart exists
+        productInfo.product_id,
+        productInfo.price,
+      ],
     );
 
     //items created, return info confirmation
@@ -263,14 +268,170 @@ router.delete("/cart/:cartID/items/:cartItemsid", JWTAuth, async (req, res) => {
 //cart checkout, index into orders database
 //check price changes
 //final price establish during order creation, the price paid here is where the customer is willing to pay
-router.post("/cart/checkout", JWTAuth, async (req, res) => {});
+//change the product stock here
+//as this is order establishement
+//provide total cost of all items
+router.post("/cart/checkout", JWTAuth, async (req, res) => {
+  const userid = req.auth.userID; //require validation
+  const shippingMethod = req.body.shipping; //require validation
+
+  //SELECT all the user associated cart tiems
+  // you need the cart, cart id, product price, quantity, description,product_id
+  //select cart items assoicated with the cart with assocaee with the user
+  //price is from products source of truth in order established price
+  //make sure stock is sifficient
+  //produce an array of rows
+  //the produc price remains the source of truth
+  //the price in the cart items table remain
+  //as the estimated price when the items waa addeddin to the cart
+  //distinct checks if the price has change and return true or false as an indicator
+  //arthimetic operation happening in the databse
+
+  const orderItems = await db.any(
+    `SELECT products.price AS pPrice, 
+    cart_items.price AS ciPrice,
+    cart_items.cart_id AS cid,
+    cart_items.quantity AS quantity,
+    cart_items.description AS desc,
+    cart_items.product_id AS pID
+    ciPrice IS DISTINCT FROM pPrice AS priceChange
+    quantity * pPrice AS linesubtotal
+    SUM(quantity * pPrice) OVER() AS orderTotal
+    FROM cart_items
+    JOIN products ON product.product_id = cart_items.product_id
+    JOIN cart ON cart.cart_id = cart_items.cart_id
+    WHERE cart.user_id = $1 AND products.is_active = TRUE`,
+    userid,
+  );
+
+  //user has no cart
+  if (orderItems.length === 0) {
+    return res.status(404).json({
+      error: "Cart not found",
+    });
+  }
+
+  //returns true if it finds an element that satifies the conditoin else false
+  const hasPriceChanged = orderItems.some((items) => {
+    return items.priceChange;
+  });
+
+  //send the proposed updated total to the user
+  //subtotal
+  const orderTotal = cartDetails[0].orderTotal;
+
+  //if there are price changes
+  //customer need to confirm those changes
+  //custom confirms the price from front end, customer must send another http requests to confirm the changes
+  //the confirmed amount need to be send from the client requests,
+  //  then check against the authorative total (recalaculated in the db)
+  //if no change then proceed
+  if (hasPriceChanged) {
+    //return 409 as the estimated price in the cart conflict with the current checkout price
+    return res.status(409).json({
+      message: "Prices changed for several products",
+      items: orderItems.map((items) => ({
+        //the prices of products which are changed
+        product_id: items.pID,
+        quantity: items.quantity,
+        cartPrice: items.ciPricem,
+        currentPrice: items.pPrice,
+        linesubtotal: items.linesubtotal,
+        priceChanged: items.priceChange, //detect price changes
+      })),
+      proposedsubTotal: orderTotal, //new updated total
+    });
+  }
+
+  //takke a shipping method from use
+  let shipping_cost;
+
+  if (shippingMethod === "standard") {
+    shipping_cost = 5; //standard price
+  }
+  shipping_cost = 10; //express
+
+  //final price including shipping
+  const finalPrice = orderTotal + shipping_cost;
+
+  //proceed with with line subtotal of each items and subtotal calculated inside the query
+  //create order and insert cart items to order items. we are using product price here
+  //when inserting the status is defo pending
+  //need to return order id
+  //using trsnasaction
+  //await for the transaction to finish
+  //autoatic commits when suceed, if rehects it. will rollback
+  //need to set isolation level as well, concurrency
+  await db.tx(async (t) => {
+    //created order for user
+    const orderResult = await t.one(
+      "INSERT INTO order (user_id, total,shipping,status) VALUES($1, $2, $3, $4) RETURNING order_id",
+      [userid, finalPrice, shippingMethod, "pending"],
+    );
+
+    //rows to be inserted into order items
+    //map each object fromm the cart to and created an order item object and then inset into the order items table
+    //an array of established orders
+    const finalOrder = orderItems.map((items) => ({
+      description: items.desc,
+      order_id: orderResult.order_id, //order id to be insertef into order items
+      price: items.pPrice,
+      quantity: items.quantity,
+      product_id: items.pID,
+    }));
+
+    //an array of transformed order rows into the order items table
+    //bulk insertions
+    await t.none(insertOrderitems(finalOrder));
+
+    //deduct quantity from the products table based on the user order items
+    //need product id, stock quantity,
+    //table checks
+    //want every product that the user orderd stock to decrease as the order is established
+    //unqiue products id and cart
+    const updatedProducts = await t.any(
+      `UPDATE products as p SET stock_quantity = p.stock_quantity - ci.quantity
+       FROM cart_items as ci 
+       JOIN carts as c ON c.cart_id = ci.id
+       WHERE c.user_id = $1
+       AND p.id = ci.product_id
+       AND p.is_active = TRUE
+       AND p.stock_quantity >= ci.quantity
+       RETURNING p.id AS pid , p.stock_quantity AS stock`,
+      userid,
+    );
+
+    //check empty
+    if (updatedProducts.length === 0) {
+      return res.status(404).json({
+        error: "User cart not found",
+      });
+    }
+    //if found but the returned products are not as intended
+    //check the length against the orderItems (this array consists of all user cart items)
+    //rollback, revert changes
+    if (updatedProducts.lenth !== orderItems.length) {
+      throw new Error("Some products are not updated");
+    }
+
+    //return a response
+    //order id, order status, ordered items, total
+    return;
+  });
+});
 
 //intiate payment, index into payment table
 router.post("/orders/:id/pay", JWTAuth, async (req, res) => {});
 //get all orders
-router.get("/orders", JWTAuth, async (req, res) => {});
+router.get("/orders", JWTAuth, async (req, res) => {
+  //get the order id and order items details
+
+  const orderResults = db.any("SELECT ");
+});
 
 //get one order
-router.get("/orders/:id", JWTAuth, async (req, res) => {});
+router.get("/orders/:id", JWTAuth, async (req, res) => {
+  const id = req.params.id;
+});
 
 export default usersRouter;

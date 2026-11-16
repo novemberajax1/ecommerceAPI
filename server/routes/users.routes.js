@@ -275,6 +275,17 @@ router.post("/cart/checkout", JWTAuth, async (req, res) => {
   const userid = req.auth.userID; //require validation
   const shippingMethod = req.body.shipping; //require validation
 
+  //check if user has a cart
+  const checkCart = db.oneOrNone(
+    "SELECT cart_id FROM cart WHERE user_id = $1",
+    userid,
+  );
+  if (checkCart === null) {
+    res.status(404).json({
+      error: "Cart not found",
+    });
+  }
+
   //SELECT all the user associated cart tiems
   // you need the cart, cart id, product price, quantity, description,product_id
   //select cart items assoicated with the cart with assocaee with the user
@@ -304,10 +315,10 @@ router.post("/cart/checkout", JWTAuth, async (req, res) => {
     userid,
   );
 
-  //user has no cart
+  //user has no cart items
   if (orderItems.length === 0) {
     return res.status(404).json({
-      error: "Cart not found",
+      error: "Items not found",
     });
   }
 
@@ -362,10 +373,17 @@ router.post("/cart/checkout", JWTAuth, async (req, res) => {
   //await for the transaction to finish
   //autoatic commits when suceed, if rehects it. will rollback
   //need to set isolation level as well, concurrency
-  await db.tx(async (t) => {
+  //either succed or failed together
+  //resolve with the object returning
+  //db operation
+  const orderCreation = await db.tx(async (t) => {
+    //transaction context object
     //created order for user
     const orderResult = await t.one(
-      "INSERT INTO order (user_id, total,shipping,status) VALUES($1, $2, $3, $4) RETURNING order_id",
+      `INSERT INTO 
+      order (user_id, total,shipping,status)
+       VALUES($1, $2, $3, $4)
+      RETURNING order_id,user_id, total,shipping, status, created_at`,
       [userid, finalPrice, shippingMethod, "pending"],
     );
 
@@ -382,13 +400,17 @@ router.post("/cart/checkout", JWTAuth, async (req, res) => {
 
     //an array of transformed order rows into the order items table
     //bulk insertions
-    await t.none(insertOrderitems(finalOrder));
+    //return an array of rows
+    const odrItems = await t.any(insertOrderitems(finalOrder));
 
     //deduct quantity from the products table based on the user order items
     //need product id, stock quantity,
     //table checks
     //want every product that the user orderd stock to decrease as the order is established
     //unqiue products id and cart
+    //bulk updates
+    //an array of rows
+    //
     const updatedProducts = await t.any(
       `UPDATE products as p SET stock_quantity = p.stock_quantity - ci.quantity
        FROM cart_items as ci 
@@ -409,29 +431,73 @@ router.post("/cart/checkout", JWTAuth, async (req, res) => {
     }
     //if found but the returned products are not as intended
     //check the length against the orderItems (this array consists of all user cart items)
-    //rollback, revert changes
-    if (updatedProducts.lenth !== orderItems.length) {
+    //rollback and revert changes
+    //just checking the length not using the returning values
+
+    if (updatedProducts.length !== orderItems.length) {
       throw new Error("Some products are not updated");
     }
 
     //return a response
     //order id, order status, ordered items, total
-    return;
+    //the transaction resolve with this json response object
+    const result = {
+      order: {
+        //user order info
+        user_id: orderResult.userID,
+        order_id: orderResult.order_id,
+        total: orderResult.total,
+        Shipping: orderResult.shipping,
+        Status: orderResult.status,
+        createdAt: orderResult.created_at,
+        items: odrItems.map((items) => ({
+          //all the items
+          orderItemsid: items.id,
+          productID: items.product_id,
+          description: items.description,
+          price: items.price,
+          createdAt: items.created_at,
+          quantity: items.quantity,
+        })),
+      },
+    };
+
+    return result;
   });
+
+  //return http response after the transaction has commmited not inside
+  //if returning inside and inventory update fails , client will see 201, that will be incorrect
+  //confirm order creation
+  return res.status(201).json({
+    orderCreation,
+  });
+});
+
+//get all orders
+//user can view this whether the status is pending,fufilled, succeeds
+//add indexing later
+
+router.get("/orders", JWTAuth, async (req, res) => {
+  const userid = req.auth.userID;
+
+  //get user order details and items
+  //identify the order by id
+  const order = db.any(
+    `SELECT 
+    o.order_id AS oID , o.total AS oTotal, 
+    o.created_at AS oCreatedat , o.shipping AS oShipping,
+     o.status AS oStatus,
+    oi.id AS oiID, oi.description AS oiDesc,
+    oi.price AS oiPrice, oi.created_at AS oiCreatedat, 
+    oi.quantity AS oiQuant, oi.pID AS oiPid
+    FROM order AS o
+    JOIN order_items AS oi ON o.order_id = oi.order_id
+    WHERE o.user_id = $1 
+    `,
+  );
 });
 
 //intiate payment, index into payment table
 router.post("/orders/:id/pay", JWTAuth, async (req, res) => {});
-//get all orders
-router.get("/orders", JWTAuth, async (req, res) => {
-  //get the order id and order items details
-
-  const orderResults = db.any("SELECT ");
-});
-
-//get one order
-router.get("/orders/:id", JWTAuth, async (req, res) => {
-  const id = req.params.id;
-});
 
 export default usersRouter;

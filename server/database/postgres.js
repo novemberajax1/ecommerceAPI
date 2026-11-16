@@ -19,7 +19,10 @@ const orderItemColumns = new pgp.helpers.ColumnSet(
 //insertion function
 function insertOrderitems(items) {
   //query
-  return pgp.helpers.insert(items, orderItemColumns);
+  return (
+    pgp.helpers.insert(items, orderItemColumns) +
+    `RETURNING id, description,price,created_at,quantity,product_id`
+  );
 }
 
 //exporting for shareed use

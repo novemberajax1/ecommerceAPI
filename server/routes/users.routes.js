@@ -444,12 +444,12 @@ router.post("/cart/checkout", JWTAuth, async (req, res) => {
     const result = {
       order: {
         //user order info
-        user_id: orderResult.userID,
-        order_id: orderResult.order_id,
-        total: orderResult.total,
-        Shipping: orderResult.shipping,
-        Status: orderResult.status,
-        createdAt: orderResult.created_at,
+        user_id: orderResult[0].userID,
+        order_id: orderResult[0].order_id,
+        total: orderResult[0].total,
+        Shipping: orderResult[0].shipping,
+        Status: orderResult[0].status,
+        createdAt: orderResult[0].created_at,
         items: odrItems.map((items) => ({
           //all the items
           orderItemsid: items.id,
@@ -480,24 +480,130 @@ router.post("/cart/checkout", JWTAuth, async (req, res) => {
 router.get("/orders", JWTAuth, async (req, res) => {
   const userid = req.auth.userID;
 
-  //get user order details and items
-  //identify the order by id
-  const order = db.any(
+  //check if user has this order
+  const checkOrder = db.oneOrNone(
+    "SELECT order_id FROM order WHERE user_id = $1",
+    userid,
+  );
+
+  if (!checkOrder) {
+    return res.status(404).json({
+      error: "Order not found",
+    });
+  }
+  //get user order details
+  const orders = await db.any(
     `SELECT 
     o.order_id AS oID , o.total AS oTotal, 
-    o.created_at AS oCreatedat , o.shipping AS oShipping,
-     o.status AS oStatus,
-    oi.id AS oiID, oi.description AS oiDesc,
-    oi.price AS oiPrice, oi.created_at AS oiCreatedat, 
+     o.shipping AS oShipping,o.status AS oStatus,
+    oi.id AS oiID, oi.description AS oiDesc, 
+    oi.price AS oiPrice,
     oi.quantity AS oiQuant, oi.pID AS oiPid
+    oi.price * oi.quantity AS oilineSubtotal
     FROM order AS o
     JOIN order_items AS oi ON o.order_id = oi.order_id
     WHERE o.user_id = $1 
     `,
+    userid,
   );
+
+  if (orders.length === 0) {
+    return res.status(404).json({
+      error: "Order items not found",
+    });
+  }
+
+  const results = {
+    orderID: orders[0].oID,
+    total: orders[0].oTotal,
+    shipping: orders[0].oShipping,
+    status: orders[0].oStatus,
+    items: orders.map((order) => ({
+      orderItemiD: order.oiID,
+      description: order.oiDesc,
+      unitPrice: order.oiPrice,
+      quantity: order.oiQuant,
+      productID: order.oiPid,
+      lineSubtotal: order.oilineSubtotal,
+    })),
+  };
+
+  res.status(200).json({
+    results,
+  });
+});
+
+router.get("/orders/:id", JWTAuth, async (req, res) => {
+  const itemID = req.params.id;
+  const userid = req.auth.userID;
+
+  //check if user has this order
+  const checkOrder = db.oneOrNone(
+    "SELECT order_id FROM order WHERE user_id = $1",
+    userid,
+  );
+  //if no order
+  if (!checkOrder) {
+    return res.status(404).json({
+      error: "Order not found",
+    });
+  }
+
+  //select itemm by id
+  const specificItem = db.oneOrNone(
+    "SELECT id, description, price, quantity, product_id FROM order_items WHERE id = $1 AND order_id = $2",
+    [itemID, checkOrder.order_id],
+  );
+
+  //order exits but requested order item not found
+  if (!specificItem) {
+    return res.status(404).json({
+      error: "Item not found",
+    });
+  }
+
+  return res.status(200).json({
+    odrItemid: specificItem.id,
+    productID: specificItem.product_id,
+    name: specificItem.description,
+    price: specificItem.price,
+    quantity: specificItem.quantity,
+  });
 });
 
 //intiate payment, index into payment table
-router.post("/orders/:id/pay", JWTAuth, async (req, res) => {});
+router.post("/orders/pay", JWTAuth, async (req, res) => {
+  const userid = req.auth.userID;
+
+  //verify the user has an order
+  //identigy the order based on id , get total,
+  const payDetails = db.oneOrNone(
+    "SELECT total,order_id FROM order WHERE user_id = $1",
+    userid,
+  );
+
+  //if no order
+  if (!payDetails) {
+    return res.status(404).json({
+      error: "Order not found",
+    });
+  }
+  //insertion into payments table first , keep a payment record if unsuccessfuil then
+  //when startiing a payment, the status is pending
+  const payment = db.one(
+    "INSERT INTO PAYMENTS (order_id, user_id, status,total) VALUES($1,$2,$3,$4)",
+    [payDetails.order_id, userid, "pending", payDetails.total],
+  );
+
+  //stripe payment API gateway, authorize payment
+
+  //payment successful update status  and order status
+
+  //if payment unsuccessfil, revert changes ?? not accept user payments
+  //prompt user to user a differnt payment method
+  //! if repeated failurs, how to handle ?? , use transactions??
+
+  //change order status to fufilled if payment successful
+});
 
 export default usersRouter;

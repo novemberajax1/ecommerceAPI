@@ -10,6 +10,7 @@ const router = Router();
 //validate query
 //use LIKE in db , searching for a wide category
 router.get("/products", async (req, res) => {
+  //user can search for differnt products
   const { q } = req.query;
 });
 

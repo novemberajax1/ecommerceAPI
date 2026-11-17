@@ -1,10 +1,11 @@
 import { Router } from "express";
 import JWTAuth from "../middleware/jwtmiddleware";
 import { db, insertOrderitems } from "../database/postgres";
+import Stripe from "stripe";
 import { body, check, validateResult } from "express-validator";
 
 const router = Router();
-
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY); //API key
 //authorization middleware verifies the token, check role admin or user
 //check role using req.auth.role, extract from sql
 
@@ -271,7 +272,7 @@ router.delete("/cart/:cartID/items/:cartItemsid", JWTAuth, async (req, res) => {
 //change the product stock here
 //as this is order establishement
 //provide total cost of all items
-router.post("/cart/checkout", JWTAuth, async (req, res) => {
+router.post("/cart/finalized", JWTAuth, async (req, res) => {
   const userid = req.auth.userID; //require validation
   const shippingMethod = req.body.shipping; //require validation
 
@@ -572,38 +573,88 @@ router.get("/orders/:id", JWTAuth, async (req, res) => {
 });
 
 //intiate payment, index into payment table
-router.post("/orders/pay", JWTAuth, async (req, res) => {
+//endpoint for stripe checkout sesion
+
+router.post("/orders/checkout-session", JWTAuth, async (req, res) => {
+  //use userid to identigy order
   const userid = req.auth.userID;
 
   //verify the user has an order
-  //identigy the order based on id , get total,
-  const payDetails = db.oneOrNone(
-    "SELECT total,order_id FROM order WHERE user_id = $1",
+  //identigy the order based on id , total is from order
+  //prder retrieval
+  const userOrders = await db.any(
+    `SELECT oi.description AS oiDesc,
+     oi.price AS oiPrice, 
+     oi.quantity AS oiQuant,
+     oi.product_id AS oiPid ,
+     oi.created_at AS oiCreatedat, 
+     o.order_id AS oOrderid,
+     o.total AS oTotal
+    FROM order_items AS oi 
+    JOIN order AS o  ON o.order_id = oi.id
+    WHERE o.user_id = $1`,
     userid,
   );
 
   //if no order
-  if (!payDetails) {
+  if (userOrders.length === 0) {
     return res.status(404).json({
       error: "Order not found",
     });
   }
-  //insertion into payments table first , keep a payment record if unsuccessfuil then
-  //when startiing a payment, the status is pending
+
+  //insert a payment record into the payments table first
   const payment = db.one(
     "INSERT INTO PAYMENTS (order_id, user_id, status,total) VALUES($1,$2,$3,$4)",
-    [payDetails.order_id, userid, "pending", payDetails.total],
+    [userOrders.oOrderid, userid, "pending", userOrders.oTotal],
   );
 
-  //stripe payment API gateway, authorize payment
+  // map it to stripe api defined schema
+  const lineItems = userOrders.map((items) => ({
+    price_data: {
+      currency: "usd",
+      unit_amount: items.oiPrice,
+      product: items.oiPid,
+      product_data: {
+        name: items.oiDesc,
+        metadata: {
+          createdAt: items.oiCreatedat,
+        },
+      },
+    },
+    quantity: items.oiQuant,
+  }));
+
+  //stripe payment API gateway, authorize payment,  backend authenticates to stripe
+  //use strip checkout session
 
   //payment successful update status  and order status
 
   //if payment unsuccessfil, revert changes ?? not accept user payments
   //prompt user to user a differnt payment method
-  //! if repeated failurs, how to handle ?? , use transactions??
+  //if repeated failurs, how to handle ?? , use transactions??
 
   //change order status to fufilled if payment successful
+  //session instance
+  //total is recalculated here ?
+  const session = await stripe.checkout.sessions.create({
+    //items that the user bought, need to index db
+    line_items: lineItems, //all user products
+
+    mode: "payment", //one time payments
+    success_url: `https://${process.env.HOST}/success.html`,
+    cancel_url: `https://${process.env.HOST}/cancel.html`,
+  });
+
+  //redirect the customer to checkout  page
+
+  res.redirect(303, session.url);
+
+  //veritfy user payments
+
+  //update payment status order status
 });
+
+//user exprss webhook to verify payment
 
 export default usersRouter;

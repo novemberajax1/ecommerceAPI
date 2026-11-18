@@ -10,7 +10,7 @@ const router = Router();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2026-10-28.endive",
 }); //API key
-const endpointsec = process.env.STRIPE_WEBHOOK_SECRET;
+const endpointsec = process.env.STRIPE_WEBHOOK_SECRET; //webhook sign secrets
 //authorization middleware verifies the token, check role admin or user
 //check role using req.auth.role, extract from sql
 
@@ -727,24 +727,18 @@ router.post(
           //update the payment status to paid
           //session id is the checkout session object id
           //exactly identify which payment
-          const payments = await t.one(
-            "UPDATE PAYMENTS SET status = 'paid' WHERE stripe_session_id = $1 AND id = $2 RETURNING id, status",
-            [session.payment_id, session.id],
+          //rejects with Queryresults error
+          await t.none(
+            "UPDATE PAYMENTS SET status = 'paid' WHERE stripe_session_id = $1 AND id = $2",
+            [session.id, session.payment_id],
           );
-          //rollback
-          if (!payments) {
-            throw new Error("Payment not found");
-          }
 
           //update order status, identify order by userid
-          const odr = await t.one(
-            "UPDATE order SET status = 'fufilled' WHERE order_id = $1 RETURNING order_id,status",
+          //will reject with query results error
+          await t.none(
+            "UPDATE order SET status = 'fufilled' WHERE order_id = $1",
             [session.client_reference_id],
           );
-          //if order not found
-          if (!odr) {
-            throw new Error("Order Not found");
-          }
         });
       }
     }

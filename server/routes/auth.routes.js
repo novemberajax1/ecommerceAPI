@@ -1,7 +1,10 @@
 import { Router } from "express";
-import { body, validationResult } from "express-validator";
+import {
+  crendentialValidate,
+  inputErrhandle,
+} from "../validation/authValidation.js";
 import argon2 from "argon2";
-import db from "../database/postgres";
+import db from "../database/postgres.js";
 import jwt from "jsonwebtoken";
 
 const router = Router();
@@ -11,23 +14,9 @@ const router = Router();
 //authN
 router.post(
   "/auth/signup",
-  [
-    body("email")
-      .trim()
-      .notEmpty()
-      .withMessage("Email cannot be empty")
-      .isEmail()
-      .withMessage("Valid email is required")
-      .normalizeEmail(),
-    body("password").trim().notEmpty().withMessage("Password cannot be empty"),
-  ],
+  crendentialValidate,
+  inputErrhandle,
   async (req, res) => {
-    //take email and password from body after validation and sanitzaiton
-    const validateResult = validationResult(req);
-    if (!validateResult.isEmpty()) {
-      res.status(400).send({ error: validateResult.array() });
-    }
-
     //extraction
     const { email, password } = req.body;
 
@@ -41,18 +30,19 @@ router.post(
       uPhash: passwordHash,
     };
 
+    //create user
     const result = await db.one(
       "INSERT INTO users(email,password_hash) VALUES($1,$2) RETURNING id",
       [userDetails.uEmail, userDetails.uPhash],
     );
 
-    const userid = result.id;
-    //secret
+    //secret to sign
+
     const secret = process.env.JWT_SECRET;
     //automatic login , including the id in user id in the payload of the JWT token
     //generate and sign JWT
     //payload,secret, expiration time
-    const token = jwt.sign({ userID: userid }, secret, {
+    const token = jwt.sign({ userID: result.id }, secret, {
       expiresIn: "15m",
     }); //expires in 15 minutes
 
@@ -69,16 +59,8 @@ router.post(
 
 router.post(
   "/auth/login",
-  [
-    body("email")
-      .trim()
-      .notEmpty()
-      .withMessage("Email cannot be empty")
-      .isEmail()
-      .withMessage("Valid email is required")
-      .normalizeEmail(),
-    body("password").trim().notEmpty().withMessage("Password cannot be empty"),
-  ],
+  crendentialValidate,
+  inputErrhandle,
   async (req, res) => {
     const { email, password } = req.body;
 
@@ -97,6 +79,7 @@ router.post(
       });
     }
 
+    //secret
     const secret = process.env.JWT_SECRET;
 
     //generate a token for the usr and sign

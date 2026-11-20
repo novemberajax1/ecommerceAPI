@@ -9,12 +9,11 @@ import { randomUUID } from "node:crypto";
 const router = Router();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2026-10-28.endive",
-}); //API key
-const endpointsec = process.env.STRIPE_WEBHOOK_SECRET; //webhook sign secrets
-//authorization middleware verifies the token, check role admin or user
-//check role using req.auth.role, extract from sql
+}); //API key for accessing stripe services API
 
-//user routes requie auth middleware
+//key for verifying wenhook requests from strip to my backend
+
+const endpointsec = process.env.STRIPE_WEBHOOK_SECRET;
 
 //get the entire cart and items, everyhting, index 2 tables
 router.get("/carts", JWTAuth, async (req, res) => {
@@ -136,6 +135,8 @@ router.post(
     const { quantityWanted, pID } = req.body; //get the product id and quantity feom the client, need validation
 
     //check whethrre the product exists, active and stock
+    //only add active products
+    //enfroce user unable to buy unavaiable products
     const productInfo = await db.oneOrNone(
       `SELECT product_id, price, description,stock_quantity 
       FROM products WHERE product_id = $1 
@@ -624,8 +625,8 @@ router.post("/orders/checkout-session", JWTAuth, async (req, res) => {
       product_data: {
         name: items.oiDesc,
         metadata: {
-          payment_id: payment.id,
-          order_id: payment.order_id,
+          payment_id: payment.id, //payment id to identify payment
+          order_id: payment.order_id, //order id to identigy order
           createdAt: items.oiCreatedat,
         },
       },
@@ -637,7 +638,7 @@ router.post("/orders/checkout-session", JWTAuth, async (req, res) => {
   //use strip checkout session
   //change order status to fufilled if payment successful
   //session instance
-  //total is recalculated here ?
+  //strip check out session
   const session = await stripe.checkout.sessions.create(
     {
       //items that the user bought, need to index db
@@ -650,7 +651,12 @@ router.post("/orders/checkout-session", JWTAuth, async (req, res) => {
       cancel_url: `https://${process.env.HOST}/cancel.html`,
     },
     {
-      idempotencyKey: randomUUID, //avoid creating multiple checloutt sessions when retyring the same creation request
+      //if the first request failed
+      //the API re executes with the same key and returns a new response
+      //same key -> idempotent
+      //same key + same requests parameters = same operation
+
+      idempotencyKey: randomUUID,
     },
   );
 
@@ -679,7 +685,8 @@ router.post("/orders/checkout-session", JWTAuth, async (req, res) => {
 //set up a webhook endpint
 //byte by byte verification
 //event handler
-
+//communicate with external services
+//wait for stripe to send events, HTTP requests
 router.post(
   "/webhooks/stripe",
   express.raw({ type: "application/json" }),
@@ -693,10 +700,12 @@ router.post(
 
       //verify signatre and parse notification (ref to the resource that changed)
       //converts the HTTP payload into a notification object
+      //event verification from stripe
       notification = stripe.parseEventNotification(
         req.body,
         signature,
-        endpointsec, //the cli then forwards stripe events to this endpoint
+        //use the secret to generate crypto signature and for verification
+        endpointsec,
       );
     } catch (err) {
       console.error(`Webhook signature verification failed.`, err.message);
@@ -711,11 +720,13 @@ router.post(
       //using checkout sessions hosted by stripe
 
       const session = await notification.fetchRelatedObject(); //retrieve the checkout session
+      //show checkout session associated info
       console.log(`Session id: ${session.id}`);
       console.log(`Payment status: ${session.payment_status}`);
       console.log(`Order id: ${session.client_reference_id}`); //set in order id
 
       //fufill customer order
+      //if paid
       if (session.payment_status === "paid") {
         console.log("Payment confirmed for:", session.id);
 
@@ -727,14 +738,14 @@ router.post(
           //update the payment status to paid
           //session id is the checkout session object id
           //exactly identify which payment
-          //rejects with Queryresults error
+          //rejects with Queryresults error and rollback
           await t.none(
             "UPDATE PAYMENTS SET status = 'paid' WHERE stripe_session_id = $1 AND id = $2",
             [session.id, session.payment_id],
           );
 
           //update order status, identify order by userid
-          //will reject with query results error
+          //will reject with query results error and rollback
           await t.none(
             "UPDATE order SET status = 'fufilled' WHERE order_id = $1",
             [session.client_reference_id],

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { query, validationResult } from "express-validator";
 import requireAdmin from "../middleware/requireAdmin";
 import JWTAuth from "../middleware/jwtmiddleware";
 import {
@@ -6,8 +7,9 @@ import {
   adminUpdateProductValidate,
   adminDeleteProductValidate,
   inputErrhandle,
-} from "../../validation/admin_validation";
+} from "../validation/admin_validation";
 import db from "../database/postgres";
+import { ExpressValidator } from "express-validator";
 const router = Router();
 
 //ADMINSTRATIVE operations
@@ -16,6 +18,7 @@ const router = Router();
 //route in here all require admin access
 //verify token like anyone else(AuthN), then check role (AuthZ)
 //express json parses incoming json to js types
+//should i set the role attribute in the jwt payload or get from the db
 router.post(
   "/admin/products",
   JWTAuth,
@@ -36,9 +39,12 @@ router.post(
 
     //insertion into database
     //return a response confirm resource creation
-
+    //is_active reamins true by default
     const result = await db.one(
-      "INSERT INTO products(description, price, stock_quantity) VALUES ($1,$2,$3) RETURNING product_id, description,price, created_at,stock_quantity",
+      `INSERT INTO 
+      products(description, price, stock_quantity) 
+      VALUES ($1,$2,$3) 
+      RETURNING product_id, description,price, created_at,stock_quantity`,
       [productDetails.pDesc, productDetails.pPrice, productDetails.pQuantity],
     );
 
@@ -65,7 +71,7 @@ router.patch(
   async (req, res) => {
     //change specific attributes of a procuct
     const id = req.params.id; //parse as strings
-    const { price, quantity } = req.body;
+    const { price, quantity, isActive } = req.body;
 
     const productUpdate = {
       pPrice: price,
@@ -76,10 +82,23 @@ router.patch(
     //or just overwrite the value like this
     //for now just reassignment
     //the stock will update if a there is a user order, or cancell incremetn and decrement
+    //admin has the privilage to upate product availability as well, activate and deactivate a product
+    //is active is optional in this case, as the admin can update other fields
+    //use coalesce for making columns to be updated optional, if null use existinf value
+    //so if the admin did not supply a value as it is optional
+    //the existing value in the db will be used if it is null
+    //if first value not null,  use the new , else NULL, use existinf value
 
     const updated = await db.oneOrNone(
-      "UPDATE products SET price = $1,stock_quantity = $2 WHERE product_id = $3 RETURNING product_id, description, price, updated_at, stock_quantity",
-      [productUpdate.pPrice, productUpdate.pQuantity, id],
+      `UPDATE products 
+       SET price = COALESCE ($1, price),
+       stock_quantity = COALESCE ($2, stock_quantity),
+       is_active = COALESCE ($3, is_active)
+       WHERE product_id = $4
+       RETURNING product_id, 
+       description, price, 
+       updated_at, stock_quantity`,
+      [productUpdate.pPrice, productUpdate.pQuantity, isActive, id],
     );
 
     //product not found
